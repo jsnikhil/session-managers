@@ -23,7 +23,7 @@
     <bytecodeTargetLevel target="1.7">
       <module name="common" target="1.7" />
       <module name="redis-store" target="1.7" />
-      <module name="session-managers" target="1.5" />
+      <module name="session-managers" target="1.7" />
     </bytecodeTargetLevel>
   </component>
 </project>
