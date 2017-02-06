@@ -72,4 +72,8 @@ public interface RedisStoreManagement {
      * @return the Redis connection uri
      */
     String getUri();
+
+    boolean getSsl();
+
+    boolean getEncryption();
 }

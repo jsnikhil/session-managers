@@ -20,17 +20,43 @@ import org.apache.catalina.Manager;
 import org.apache.catalina.Session;
 import org.apache.catalina.session.StandardSession;
 
+import javax.crypto.Cipher;
+import javax.crypto.CipherInputStream;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.io.OutputStream;
+import java.util.logging.Logger;
 
 /**
  * Utilities for serializing and deserializing {@link Session}s
  */
 public final class SessionSerializationUtils {
+
+    private final Logger logger = Logger.getLogger(this.getClass().getName());
+    public static final String CIPHER_ALGORITHM = "AES";
+    public static final String CIPHER_MODE = "CBC";
+    public static final String CIPHER_PADDING = "PKCS5Padding";
+
+    private static final String TRANSFORMATION = CIPHER_ALGORITHM + "/" + CIPHER_MODE + "/" + CIPHER_PADDING;
+    private static final int BLOCK_SIZE = 1024;
+    /**
+     * **DO NOT CHANGE** - AES can use a 16-byte initialisation vector. Content is irrelevant.
+     */
+    private static final byte[] INITIALISATION_VECTOR = {
+            'I', 'N', 'I', 'T', 'V', 'E', 'C', 'T', 'I', 'N', 'I', 'T', 'V', 'E', 'C', 'T'
+    };
+
+    private static final IvParameterSpec IVSPEC = new IvParameterSpec(INITIALISATION_VECTOR);
+
+    Cipher cipher = null;
+    private SecretKeySpec secretKey = null;
 
     private final Manager manager;
 
@@ -41,6 +67,11 @@ public final class SessionSerializationUtils {
      */
     public SessionSerializationUtils(Manager manager) {
         this.manager = manager;
+        try {
+            cipher = Cipher.getInstance(TRANSFORMATION);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     /**
@@ -58,9 +89,26 @@ public final class SessionSerializationUtils {
 
         ByteArrayInputStream bytes = null;
         ObjectInputStream in = null;
+        ByteArrayOutputStream cipherOStream = null;
+        byte[] sessionBytes = null;
 
         try {
-            bytes = new ByteArrayInputStream(session);
+            if (secretKey != null) {
+                // decrypt the bytes
+                synchronized (cipher) {
+                    cipherOStream = new ByteArrayOutputStream();
+                    try {
+                        cipher.init(Cipher.DECRYPT_MODE, secretKey, IVSPEC);
+                        transform(cipher, new ByteArrayInputStream(session), cipherOStream);
+                        cipherOStream.flush();
+                        sessionBytes = cipherOStream.toByteArray();
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+
+            bytes = new ByteArrayInputStream(sessionBytes == null ? session : sessionBytes);
             in = new ObjectInputStream(bytes);
 
             StandardSession standardSession = (StandardSession) this.manager.createEmptySession();
@@ -80,24 +128,62 @@ public final class SessionSerializationUtils {
      * @throws IOException
      */
     public byte[] serialize(Session session) throws IOException {
-        ByteArrayOutputStream bytes = null;
+        ByteArrayOutputStream bytesOStream = null;
+        ByteArrayOutputStream cipherOStream = null;
         ObjectOutputStream out = null;
+        byte[] bytes = null;
 
         try {
-            bytes = new ByteArrayOutputStream();
-            out = new ObjectOutputStream(bytes);
+            bytesOStream = new ByteArrayOutputStream();
+            out = new ObjectOutputStream(bytesOStream);
 
             StandardSession standardSession = (StandardSession) session;
             standardSession.writeObjectData(out);
 
             out.flush();
-            bytes.flush();
+            bytesOStream.flush();
 
-            return bytes.toByteArray();
+            if (secretKey != null) {
+                synchronized (cipher) {
+                    cipherOStream = new ByteArrayOutputStream();
+                    // encrypt the byte[]
+                    try {
+                        cipher.init(Cipher.ENCRYPT_MODE, secretKey, IVSPEC);
+                        transform(cipher, new ByteArrayInputStream(bytesOStream.toByteArray()), cipherOStream);
+                        cipherOStream.flush();
+                        bytes = cipherOStream.toByteArray();
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+            if (bytes == null) {
+                bytes = bytesOStream.toByteArray();
+            }
+            return bytes;
+
         } finally {
-            closeQuietly(out, bytes);
+            closeQuietly(out, bytesOStream, cipherOStream);
         }
 
+    }
+
+    public void transform(Cipher cipher, InputStream src, OutputStream dest) throws IOException {
+        CipherInputStream cis = new CipherInputStream(src, cipher);
+        byte[] block = new byte[BLOCK_SIZE];
+        int len;
+        while ((len = cis.read(block, 0, BLOCK_SIZE)) > -1) {
+            dest.write(block, 0, len);
+        }
+        cis.close();
+    }
+
+    public SecretKeySpec getSecretKey() {
+        return secretKey;
+    }
+
+    public void setSecretKey(SecretKeySpec secretKey) {
+        this.secretKey = secretKey;
     }
 
     private void closeQuietly(Closeable... closeables) {

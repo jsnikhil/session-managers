@@ -37,9 +37,13 @@ import redis.clients.jedis.Response;
 import redis.clients.jedis.Transaction;
 import redis.clients.jedis.exceptions.JedisConnectionException;
 
+import javax.crypto.spec.SecretKeySpec;
 import java.beans.PropertyChangeListener;
 import java.io.IOException;
 import java.net.URI;
+import java.net.URL;
+import java.security.KeyStore;
+import java.util.Properties;
 import java.util.Set;
 import java.util.logging.Logger;
 
@@ -77,6 +81,11 @@ public final class RedisStore extends AbstractLifecycle implements RedisStoreMan
     private volatile String password;
 
     private volatile int port = Protocol.DEFAULT_PORT;
+
+    private volatile boolean ssl = false;
+
+    private volatile boolean encryption = false;
+    private volatile boolean encryptionInitialized = false;
 
     private volatile SessionSerializationUtils sessionSerializationUtils;
 
@@ -326,6 +335,56 @@ public final class RedisStore extends AbstractLifecycle implements RedisStoreMan
                 return null;
             }
 
+        });
+    }
+
+    @Override
+    public boolean getSsl() {
+        return this.lockTemplate.withReadLock(new LockTemplate.LockedOperation<Boolean>() {
+
+            @Override
+            public Boolean invoke() {
+                return RedisStore.this.ssl;
+            }
+
+        });
+    }
+
+    public void setSsl(final boolean ssl) {
+        this.lockTemplate.withWriteLock(new LockTemplate.LockedOperation<Void>() {
+
+            @Override
+            public Void invoke() {
+                boolean previous = RedisStore.this.ssl;
+                RedisStore.this.ssl = ssl;
+                RedisStore.this.propertyChangeSupport.notify("ssl", previous, RedisStore.this.ssl);
+                return null;
+            }
+
+        });
+    }
+
+    @Override
+    public boolean getEncryption() {
+        return this.lockTemplate.withReadLock(new LockTemplate.LockedOperation<Boolean>() {
+
+            @Override
+            public Boolean invoke() {
+                return RedisStore.this.encryption;
+            }
+        });
+    }
+
+    public void setEncryption(final boolean encryption) {
+        this.lockTemplate.withWriteLock(new LockTemplate.LockedOperation<Void>() {
+
+            @Override
+            public Void invoke() {
+                boolean previous = RedisStore.this.encryption;
+                RedisStore.this.encryption = encryption;
+                RedisStore.this.propertyChangeSupport.notify("encryption", previous, RedisStore.this.encryption);
+                return null;
+            }
         });
     }
 
@@ -599,7 +658,7 @@ public final class RedisStore extends AbstractLifecycle implements RedisStoreMan
                     poolConfig.setMaxTotal(RedisStore.this.connectionPoolSize);
 
                     RedisStore.this.jedisPool = new JedisPool(poolConfig, RedisStore.this.host, RedisStore.this.port,
-                            RedisStore.this.timeout, RedisStore.this.password, RedisStore.this.database);
+                            RedisStore.this.timeout, RedisStore.this.password, RedisStore.this.database, RedisStore.this.ssl);
                 }
 
 
@@ -607,6 +666,37 @@ public final class RedisStore extends AbstractLifecycle implements RedisStoreMan
                 connect();
                 RedisStore.this.jmxSupport.register(getObjectName(), RedisStore.this);
 
+                // initialize encryption if enabled
+                if (RedisStore.this.encryption && !encryptionInitialized) {
+                    encryptionInitialized = true;
+                    try {
+                        // read the keystore files
+                        String propertiesLocation = System.getProperty("keystore.properties.file");
+                        String jksLocation = System.getProperty("keystore.location.file");
+                        if (propertiesLocation == null) {
+                            RedisStore.this.logger.warning("System property keystore.properties.file missing. " +
+                                    "Disabling encryption");
+                            return null;
+                        }
+                        if (jksLocation == null) {
+                            RedisStore.this.logger.warning("System property keystore.location.file missing. " +
+                                    "Disabling encryption");
+                            return null;
+                        }
+                        Properties properties = new Properties();
+                        properties.load(new URL(propertiesLocation).openStream());
+                        String ksPassword = properties.getProperty("keystore.password");
+                        KeyStore keyStore = loadKeyStore(jksLocation, "JCEKS", ksPassword);
+                        SecretKeySpec keySpec = (SecretKeySpec) keyStore.getKey("thunderhead256", ksPassword.toCharArray());
+                        RedisStore.this.sessionSerializationUtils.setSecretKey(keySpec);
+                        RedisStore.this.logger.info("Enabling session encryption");
+
+                    } catch (Exception e) {
+                        RedisStore.this.logger.warning("Failed to load keystore details. Disabling encryption. " +
+                                "Error: " + e);
+                    }
+
+                }
                 return null;
             }
 
@@ -682,5 +772,14 @@ public final class RedisStore extends AbstractLifecycle implements RedisStoreMan
         }
 
         return userInfo.split(":", 2)[1];
+    }
+
+    public KeyStore loadKeyStore(String keyStoreLocation, String type, String keyStorePassword) throws
+            Exception {
+        try (java.io.InputStream is = new URL(keyStoreLocation).openStream()) {
+            KeyStore keyStore = KeyStore.getInstance(type);
+            keyStore.load(is, keyStorePassword.toCharArray());
+            return keyStore;
+        }
     }
 }
